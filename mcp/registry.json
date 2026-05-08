@@ -1,0 +1,214 @@
+{
+  "version": "1.0.0",
+  "description": "MCP registry — base layer always loaded, selectable loaded per agent",
+  "layers": {
+    "base": {
+      "description": "Always loaded for every agent",
+      "servers": [
+        {
+          "id": "fetch",
+          "name": "Fetch MCP",
+          "category": "web",
+          "command": "uvx",
+          "args": ["mcp-server-fetch"],
+          "env": {},
+          "enabled": true,
+          "description": "HTTP fetch for any URL or API endpoint",
+          "required_env": []
+        },
+        {
+          "id": "filesystem",
+          "name": "Filesystem MCP",
+          "category": "storage",
+          "command": "node",
+          "args": ["${NPM_GLOBAL_ROOT}/@modelcontextprotocol/server-filesystem/dist/index.js", "${AGENT_WORKSPACE}"],
+          "env": {},
+          "enabled": true,
+          "description": "Read and write files in the agent workspace",
+          "required_env": []
+        },
+        {
+          "id": "memory",
+          "name": "Memory MCP",
+          "category": "memory",
+          "command": "node",
+          "args": ["${NPM_GLOBAL_ROOT}/@modelcontextprotocol/server-memory/dist/index.js"],
+          "env": {},
+          "enabled": true,
+          "description": "Persistent knowledge graph memory across sessions",
+          "required_env": []
+        },
+        {
+          "id": "git",
+          "name": "Git MCP",
+          "category": "dev",
+          "command": "uvx",
+          "args": ["mcp-server-git", "--repository", "${GIT_REPO_PATH}"],
+          "env": {},
+          "enabled": true,
+          "description": "Git operations: log, diff, commit, branch, status",
+          "required_env": []
+        }
+      ]
+    },
+    "selectable": {
+      "description": "Agent picks these at creation time",
+      "servers": [
+        {
+          "id": "github",
+          "name": "GitHub MCP",
+          "category": "dev",
+          "command": "node",
+          "args": ["${NPM_GLOBAL_ROOT}/@modelcontextprotocol/server-github/dist/index.js"],
+          "env": {"GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"},
+          "enabled": false,
+          "description": "GitHub repos, issues, PRs, code search",
+          "required_env": ["GITHUB_TOKEN"]
+        },
+        {
+          "id": "firecrawl",
+          "name": "Firecrawl MCP",
+          "category": "web",
+          "command": "npx",
+          "args": ["-y", "firecrawl-mcp"],
+          "env": {"FIRECRAWL_API_KEY": "${FIRECRAWL_API_KEY}"},
+          "enabled": false,
+          "description": "Web scraping and structured data extraction",
+          "required_env": ["FIRECRAWL_API_KEY"]
+        },
+        {
+          "id": "playwright",
+          "name": "Playwright MCP",
+          "category": "web",
+          "command": "npx",
+          "args": ["@playwright/mcp@latest"],
+          "env": {},
+          "enabled": false,
+          "description": "Browser automation and UI interaction",
+          "required_env": []
+        },
+        {
+          "id": "supabase",
+          "name": "Supabase MCP",
+          "category": "database",
+          "command": "npx",
+          "args": ["-y", "@supabase/mcp-server-supabase@latest"],
+          "env": {"SUPABASE_ACCESS_TOKEN": "${SUPABASE_ACCESS_TOKEN}"},
+          "enabled": false,
+          "description": "Supabase DB, auth, vector store, edge functions",
+          "required_env": ["SUPABASE_ACCESS_TOKEN"]
+        },
+        {
+          "id": "postgres",
+          "name": "PostgreSQL MCP",
+          "category": "database",
+          "command": "npx",
+          "args": ["-y", "@modelcontextprotocol/server-postgres", "${POSTGRES_URL}"],
+          "env": {},
+          "enabled": false,
+          "description": "Query and manage PostgreSQL databases",
+          "required_env": ["POSTGRES_URL"]
+        },
+        {
+          "id": "slack",
+          "name": "Slack MCP",
+          "category": "productivity",
+          "command": "npx",
+          "args": ["-y", "@modelcontextprotocol/server-slack"],
+          "env": {"SLACK_BOT_TOKEN": "${SLACK_BOT_TOKEN}", "SLACK_TEAM_ID": "${SLACK_TEAM_ID}"},
+          "enabled": false,
+          "description": "Send and read Slack messages, search channels",
+          "required_env": ["SLACK_BOT_TOKEN", "SLACK_TEAM_ID"]
+        },
+        {
+          "id": "jira",
+          "name": "Jira MCP",
+          "category": "productivity",
+          "command": "npx",
+          "args": ["-y", "mcp-server-atlassian"],
+          "env": {
+            "ATLASSIAN_API_TOKEN": "${ATLASSIAN_API_TOKEN}",
+            "ATLASSIAN_EMAIL": "${ATLASSIAN_EMAIL}",
+            "ATLASSIAN_DOMAIN": "${ATLASSIAN_DOMAIN}"
+          },
+          "enabled": false,
+          "description": "Jira issues, sprints, projects",
+          "required_env": ["ATLASSIAN_API_TOKEN", "ATLASSIAN_EMAIL", "ATLASSIAN_DOMAIN"]
+        },
+        {
+          "id": "hubspot",
+          "name": "HubSpot MCP",
+          "category": "business",
+          "command": "npx",
+          "args": ["-y", "@hubspot/mcp-server"],
+          "env": {"HUBSPOT_ACCESS_TOKEN": "${HUBSPOT_ACCESS_TOKEN}"},
+          "enabled": false,
+          "description": "HubSpot contacts, deals, pipeline management",
+          "required_env": ["HUBSPOT_ACCESS_TOKEN"]
+        },
+        {
+          "id": "stripe",
+          "name": "Stripe MCP",
+          "category": "business",
+          "command": "npx",
+          "args": ["-y", "@stripe/mcp-server"],
+          "env": {"STRIPE_SECRET_KEY": "${STRIPE_SECRET_KEY}"},
+          "enabled": false,
+          "description": "Stripe payments, subscriptions, invoices",
+          "required_env": ["STRIPE_SECRET_KEY"]
+        },
+        {
+          "id": "kubernetes",
+          "name": "Kubernetes MCP",
+          "category": "devops",
+          "command": "npx",
+          "args": ["-y", "kubectl-mcp-server"],
+          "env": {"KUBECONFIG": "${KUBECONFIG}"},
+          "enabled": false,
+          "description": "Kubernetes cluster management and monitoring",
+          "required_env": ["KUBECONFIG"]
+        },
+        {
+          "id": "grafana",
+          "name": "Grafana MCP",
+          "category": "devops",
+          "command": "npx",
+          "args": ["-y", "@grafana/mcp-grafana"],
+          "env": {"GRAFANA_URL": "${GRAFANA_URL}", "GRAFANA_SERVICE_ACCOUNT_TOKEN": "${GRAFANA_TOKEN}"},
+          "enabled": false,
+          "description": "Grafana dashboards, alerts, incident investigation",
+          "required_env": ["GRAFANA_URL", "GRAFANA_TOKEN"]
+        },
+        {
+          "id": "huggingface",
+          "name": "Hugging Face MCP",
+          "category": "ai_ml",
+          "command": "npx",
+          "args": ["-y", "mcp-hfspace"],
+          "env": {"HF_TOKEN": "${HF_TOKEN}"},
+          "enabled": false,
+          "description": "Search HuggingFace models, datasets, papers",
+          "required_env": ["HF_TOKEN"]
+        },
+        {
+          "id": "ahrefs",
+          "name": "Ahrefs MCP",
+          "category": "business",
+          "command": "npx",
+          "args": ["-y", "mcp-ahrefs"],
+          "env": {"AHREFS_API_KEY": "${AHREFS_API_KEY}"},
+          "enabled": false,
+          "description": "SEO keywords, backlinks, rank tracking",
+          "required_env": ["AHREFS_API_KEY"]
+        }
+      ]
+    }
+  },
+  "builtin_skills": [
+    {"id": "web_search",        "name": "Web Search",        "enabled": true,  "description": "Real-time web search via Tavily"},
+    {"id": "code_execution",    "name": "Code Execution",    "enabled": true,  "description": "Run Python in a sandbox"},
+    {"id": "structured_output", "name": "Structured Output", "enabled": true,  "description": "Pydantic-validated JSON responses"},
+    {"id": "prompt_enhancer",   "name": "Prompt Enhancer",   "enabled": true,  "description": "Rewrites user prompt to richer context"},
+    {"id": "token_compression", "name": "Token Compression", "enabled": true,  "description": "Summarise long contexts before LLM call"}
+  ]
+}
