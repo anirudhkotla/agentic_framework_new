@@ -1,0 +1,47 @@
+{
+  "_comment": "TEMPLATE — copy this file, rename to your-plugin-id.plugin.json, fill in the fields, then upload via the UI or drop into plugins/user/",
+
+  "id": "my-internal-api",
+  "name": "My Internal API",
+  "version": "1.0.0",
+  "type": "http_tool",
+  "category": "custom",
+  "description": "Access our internal company API for [describe what it does]",
+  "author": "your-name",
+  "tags": ["internal", "company"],
+
+  "base_url": "https://api.yourcompany.com/v1",
+  "auth_header": "Authorization",
+  "auth_env": "INTERNAL_API_KEY",
+  "required_env": ["INTERNAL_API_KEY"],
+
+  "endpoints": [
+    {
+      "name": "list_items",
+      "method": "GET",
+      "path": "/items",
+      "description": "List all items",
+      "params": { "limit": 50 }
+    },
+    {
+      "name": "get_item",
+      "method": "GET",
+      "path": "/items/{id}",
+      "description": "Get a specific item by ID"
+    },
+    {
+      "name": "create_item",
+      "method": "POST",
+      "path": "/items",
+      "description": "Create a new item"
+    }
+  ],
+
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "query": { "type": "string", "description": "What to search or query" }
+    },
+    "required": ["query"]
+  }
+}

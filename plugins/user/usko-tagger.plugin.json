@@ -1,0 +1,23 @@
+{
+  "id": "usko-tagger",
+  "name": "USKO Tagger",
+  "version": "1.0.0",
+  "type": "python_skill",
+  "category": "custom",
+  "description": "Appends the word USKO to any text. Use this tool to tag or sign off any response or message with USKO.",
+  "author": "user",
+  "tags": ["usko", "tag", "custom", "branding"],
+  "module_path": "skills/usko_tagger.py",
+  "function": "tag",
+  "required_env": [],
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "text": {
+        "type": "string",
+        "description": "The text to append USKO to"
+      }
+    },
+    "required": ["text"]
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "id": "notion",
+  "name": "Notion MCP",
+  "version": "1.0.0",
+  "type": "mcp",
+  "category": "productivity",
+  "description": "Read and write Notion pages, databases, and blocks. Search across your workspace.",
+  "author": "community",
+  "tags": ["notion", "notes", "wiki", "docs", "knowledge-base"],
+  "command": "npx",
+  "args": ["-y", "@notionhq/mcp"],
+  "env": {
+    "NOTION_API_KEY": "${NOTION_API_KEY}"
+  },
+  "required_env": ["NOTION_API_KEY"]
+}

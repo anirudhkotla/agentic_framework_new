@@ -65,6 +65,31 @@ def _copy_source_files(folder: Path):
                 shutil.copy2(f, dest / f.name)
     shutil.copy2(_FW_ROOT / "mcp" / "registry.json", folder / "mcp" / "registry.json")
 
+    # Copy plugins module so deployed agents can execute plugin skills
+    src_plugins = _FW_ROOT / "plugins"
+    dest_plugins = folder / "plugins"
+    dest_plugins.mkdir(exist_ok=True)
+    (dest_plugins / "__init__.py").touch()
+    for d in ["community", "user"]:
+        (dest_plugins / d).mkdir(exist_ok=True)
+    for f in src_plugins.iterdir():
+        if f.suffix == ".py":
+            shutil.copy2(f, dest_plugins / f.name)
+    # Copy community plugin definitions and skills
+    src_community = src_plugins / "community"
+    dest_community = dest_plugins / "community"
+    if src_community.exists():
+        for f in src_community.iterdir():
+            if f.suffix == ".json":
+                shutil.copy2(f, dest_community / f.name)
+        src_skills = src_community / "skills"
+        if src_skills.exists():
+            dest_skills = dest_community / "skills"
+            dest_skills.mkdir(exist_ok=True)
+            for f in src_skills.iterdir():
+                if f.suffix == ".py":
+                    shutil.copy2(f, dest_skills / f.name)
+
 
 # ─── agent_config.json ───────────────────────────────────────────────────────
 

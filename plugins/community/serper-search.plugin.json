@@ -1,0 +1,43 @@
+{
+  "id": "serper-search",
+  "name": "Serper Google Search",
+  "version": "1.0.0",
+  "type": "http_tool",
+  "category": "web",
+  "description": "Google search via Serper API. Returns organic results, snippets, knowledge graph, and related searches.",
+  "author": "community",
+  "tags": ["search", "google", "web", "research"],
+  "base_url": "https://google.serper.dev",
+  "auth_header": "X-API-KEY",
+  "auth_env": "SERPER_API_KEY",
+  "required_env": ["SERPER_API_KEY"],
+  "endpoints": [
+    {
+      "name": "search",
+      "method": "POST",
+      "path": "/search",
+      "description": "Google search for any query",
+      "body_schema": {
+        "type": "object",
+        "properties": {
+          "q": { "type": "string", "description": "Search query" },
+          "num": { "type": "integer", "default": 10 }
+        },
+        "required": ["q"]
+      }
+    },
+    {
+      "name": "news",
+      "method": "POST",
+      "path": "/news",
+      "description": "Search Google News for recent articles"
+    }
+  ],
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "query": { "type": "string", "description": "Search query" }
+    },
+    "required": ["query"]
+  }
+}

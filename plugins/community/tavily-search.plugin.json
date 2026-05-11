@@ -1,0 +1,37 @@
+{
+  "id": "tavily-search",
+  "name": "Tavily Web Search",
+  "version": "1.0.0",
+  "type": "http_tool",
+  "category": "web",
+  "description": "Real-time web search powered by Tavily API. Returns current search results with snippets and URLs.",
+  "author": "community",
+  "tags": ["search", "web", "research", "realtime"],
+  "base_url": "https://api.tavily.com",
+  "auth_header": "Authorization",
+  "auth_env": "TAVILY_API_KEY",
+  "required_env": ["TAVILY_API_KEY"],
+  "endpoints": [
+    {
+      "name": "search",
+      "method": "POST",
+      "path": "/search",
+      "description": "Search the web for current information",
+      "body_schema": {
+        "type": "object",
+        "properties": {
+          "query": { "type": "string", "description": "Search query" },
+          "max_results": { "type": "integer", "default": 5 }
+        },
+        "required": ["query"]
+      }
+    }
+  ],
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "query": { "type": "string", "description": "What to search for" }
+    },
+    "required": ["query"]
+  }
+}

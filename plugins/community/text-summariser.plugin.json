@@ -1,0 +1,21 @@
+{
+  "id": "text-summariser",
+  "name": "Text Summariser Skill",
+  "version": "1.0.0",
+  "type": "python_skill",
+  "category": "custom",
+  "description": "Summarise long text using extractive summarisation. No API key needed — runs locally.",
+  "author": "community",
+  "tags": ["summarise", "text", "nlp", "local", "no-api-key"],
+  "module_path": "skills/text_summariser.py",
+  "function": "summarise",
+  "required_env": [],
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "text":       { "type": "string",  "description": "Text to summarise" },
+      "max_sentences": { "type": "integer", "description": "Max sentences in summary", "default": 3 }
+    },
+    "required": ["text"]
+  }
+}

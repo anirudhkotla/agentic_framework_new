@@ -1,0 +1,24 @@
+{
+  "id": "hi-anirudh",
+  "name": "Hi Anirudh",
+  "version": "1.0.0",
+  "type": "python_skill",
+  "category": "custom",
+  "description": "Greets Anirudh. Call this tool to say Hi Anirudh.",
+  "author": "community",
+  "tags": ["greeting", "anirudh", "hi", "custom"],
+  "module_path": "community/skills/hi_anirudh.py",
+  "function": "say_hi",
+  "required_env": [],
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "message": {
+        "type": "string",
+        "description": "Optional extra message to include in the greeting",
+        "default": ""
+      }
+    },
+    "required": []
+  }
+}

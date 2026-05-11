@@ -1,0 +1,20 @@
+{
+  "id": "my-skill",
+  "name": "My Python Skill",
+  "version": "1.0.0",
+  "type": "python_skill",
+  "category": "custom",
+  "description": "What this skill does",
+  "author": "your-name",
+  "tags": ["custom"],
+  "module_path": "skills/my_skill.py",
+  "function": "run",
+  "required_env": [],
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "query": { "type": "string", "description": "Input to the skill" }
+    },
+    "required": ["query"]
+  }
+}

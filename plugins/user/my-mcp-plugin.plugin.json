@@ -1,0 +1,14 @@
+{
+  "id": "my-mcp",
+  "name": "My MCP Server",
+  "version": "1.0.0",
+  "type": "mcp",
+  "category": "custom",
+  "description": "What this MCP server does",
+  "author": "your-name",
+  "tags": ["custom"],
+  "command": "npx",
+  "args": ["-y", "my-mcp-package"],
+  "env": { "MY_API_KEY": "${MY_API_KEY}" },
+  "required_env": ["MY_API_KEY"]
+}
