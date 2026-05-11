@@ -173,42 +173,61 @@ class TestPromptBuilder:
 
 class TestSessionMemory:
 
-    def test_append_get(self):
+    def test_initializes_agent_memory_file(self, tmp_path):
+        from core.executor import SessionMemory
+        m = SessionMemory(agents_dir=tmp_path)
+        m.initialize_agent("agent-a", "Agent A")
+        path = tmp_path / "agent-a" / "memory.json"
+        data = json.loads(path.read_text())
+        assert data["agent_id"] == "agent-a"
+        assert data["agent_name"] == "Agent A"
+        assert data["sessions"] == {}
+
+    def test_append_get(self, tmp_path):
         from core.executor import SessionMemory
         from core.models import ChatMessage, MessageRole
-        m = SessionMemory()
-        m.append("s1", ChatMessage(role=MessageRole.USER, content="Hello"))
-        assert m.get("s1")[0].content == "Hello"
+        m = SessionMemory(agents_dir=tmp_path)
+        m.append("agent-a", "s1", ChatMessage(role=MessageRole.USER, content="Hello"))
+        assert m.get("agent-a", "s1")[0].content == "Hello"
 
-    def test_empty(self):
+    def test_empty(self, tmp_path):
         from core.executor import SessionMemory
-        assert SessionMemory().get("x") == []
+        assert SessionMemory(agents_dir=tmp_path).get("agent-x") == []
 
-    def test_clear(self):
-        from core.executor import SessionMemory
-        from core.models import ChatMessage, MessageRole
-        m = SessionMemory()
-        m.append("s1", ChatMessage(role=MessageRole.USER, content="hi"))
-        m.clear("s1")
-        assert m.get("s1") == []
-
-    def test_isolated(self):
+    def test_clear(self, tmp_path):
         from core.executor import SessionMemory
         from core.models import ChatMessage, MessageRole
-        m = SessionMemory()
-        m.append("s1", ChatMessage(role=MessageRole.USER, content="A"))
-        m.append("s2", ChatMessage(role=MessageRole.USER, content="B"))
-        assert m.get("s1")[0].content == "A"
-        assert m.get("s2")[0].content == "B"
+        m = SessionMemory(agents_dir=tmp_path)
+        m.append("agent-a", "s1", ChatMessage(role=MessageRole.USER, content="hi"))
+        m.clear("agent-a", "s1")
+        assert m.get("agent-a", "s1") == []
 
-    def test_to_lc_messages(self):
+    def test_isolated(self, tmp_path):
+        from core.executor import SessionMemory
+        from core.models import ChatMessage, MessageRole
+        m = SessionMemory(agents_dir=tmp_path)
+        m.append("agent-a", "s1", ChatMessage(role=MessageRole.USER, content="A"))
+        m.append("agent-b", "s1", ChatMessage(role=MessageRole.USER, content="B"))
+        assert m.get("agent-a", "s1")[0].content == "A"
+        assert m.get("agent-b", "s1")[0].content == "B"
+
+    def test_tree_keeps_session_branches(self, tmp_path):
+        from core.executor import SessionMemory
+        from core.models import ChatMessage, MessageRole
+        m = SessionMemory(agents_dir=tmp_path)
+        m.append("agent-a", "s1", ChatMessage(role=MessageRole.USER, content="A"))
+        m.append("agent-a", "s2", ChatMessage(role=MessageRole.USER, content="B"))
+        tree = m.tree("agent-a")
+        assert set(tree["sessions"]) == {"s1", "s2"}
+
+    def test_to_lc_messages(self, tmp_path):
         from core.executor import SessionMemory
         from core.models import ChatMessage, MessageRole
         from langchain_core.messages import HumanMessage, AIMessage
-        m = SessionMemory()
-        m.append("s1", ChatMessage(role=MessageRole.USER, content="Q"))
-        m.append("s1", ChatMessage(role=MessageRole.ASSISTANT, content="A"))
-        lc = m.to_lc_messages("s1")
+        m = SessionMemory(agents_dir=tmp_path)
+        m.append("agent-a", "s1", ChatMessage(role=MessageRole.USER, content="Q"))
+        m.append("agent-a", "s1", ChatMessage(role=MessageRole.ASSISTANT, content="A"))
+        lc = m.to_lc_messages("agent-a")
         assert isinstance(lc[0], HumanMessage) and isinstance(lc[1], AIMessage)
 
 
@@ -241,6 +260,7 @@ class TestAgentFolder:
         cfg = self._make_config()
         folder = write_agent_folder(cfg, self._registry_data())
         assert (folder / "agent_config.json").exists()
+        assert (folder / "memory.json").exists()
         assert (folder / ".env.template").exists()
         assert (folder / "README.md").exists()
         assert (folder / "requirements.txt").exists()
@@ -257,6 +277,18 @@ class TestAgentFolder:
         assert (folder / "mcp" / "host.py").exists()
         assert (folder / "prompts" / "system_prompt.py").exists()
         assert (folder / "api" / "routes.py").exists()
+        shutil.rmtree(folder)
+
+    def test_linked_folder_avoids_runtime_copies(self):
+        from core.agent_folder import write_linked_agent_folder
+        cfg = self._make_config()
+        folder = write_linked_agent_folder(cfg, self._registry_data())
+        assert (folder / "agent_config.json").exists()
+        assert (folder / "mcp" / "registry.json").exists()
+        assert (folder / "prompts" / "system_prompt.md").exists()
+        assert not (folder / "core" / "executor.py").exists()
+        assert not (folder / "api" / "routes.py").exists()
+        assert not (folder / ".env.template").exists()
         shutil.rmtree(folder)
 
     def test_env_template_has_mistral_key(self):
@@ -302,6 +334,38 @@ class TestAgentFolder:
         assert "MistralExecutor" in main_text
         shutil.rmtree(folder)
 
+    def test_deployed_config_flag(self):
+        from core.agent_folder import write_agent_folder
+        cfg = self._make_config()
+        folder = write_agent_folder(cfg, self._registry_data())
+        loaded = json.loads((folder / "agent_config.json").read_text())
+        assert loaded["deployed"] is True
+        shutil.rmtree(folder)
+
+    def test_deployed_agent_includes_selected_mcp_plugin(self):
+        from core.agent_folder import write_agent_folder
+        cfg = self._make_config()
+        cfg.selected_plugin_ids = ["my-mcp"]
+        folder = write_agent_folder(cfg, self._registry_data())
+        registry = json.loads((folder / "mcp" / "registry.json").read_text())
+        sel_ids = {s["id"] for s in registry["layers"]["selectable"]["servers"]}
+        main_text = (folder / "main.py").read_text()
+        env = (folder / ".env.template").read_text()
+        assert "my-mcp" in sel_ids
+        assert (folder / "plugins" / "user" / "my-mcp-plugin.plugin.json").exists()
+        assert "my-mcp" in main_text
+        assert "MY_API_KEY" in env
+        shutil.rmtree(folder)
+
+    def test_deployed_agent_copies_selected_python_skill_plugin(self):
+        from core.agent_folder import write_agent_folder
+        cfg = self._make_config()
+        cfg.selected_plugin_ids = ["hi-anirudh"]
+        folder = write_agent_folder(cfg, self._registry_data())
+        assert (folder / "plugins" / "community" / "hi-anirudh.plugin.json").exists()
+        assert (folder / "plugins" / "community" / "skills" / "hi_anirudh.py").exists()
+        shutil.rmtree(folder)
+
 
 # ─── 6. Agent Manager ────────────────────────────────────────────────────────
 
@@ -321,7 +385,22 @@ class TestAgentManager:
         m = self._manager()
         cfg, folder = m.create(CreateAgentRequest(name="T", usecase_context="x"))
         assert cfg.agent_id.startswith("agent-") and folder.exists()
+        assert cfg.deployed is False
+        assert not (folder / "core" / "executor.py").exists()
         shutil.rmtree(folder)
+
+    def test_deploy_promotes_agent_folder(self):
+        from core.models import CreateAgentRequest
+        m = self._manager()
+        cfg, folder = m.create(CreateAgentRequest(name="T", usecase_context="x"))
+        result = m.deploy(cfg.agent_id)
+        assert result is not None
+        deployed_cfg, deployed_folder = result
+        assert deployed_cfg.deployed is True
+        assert deployed_folder == folder
+        assert (deployed_folder / "core" / "executor.py").exists()
+        assert (deployed_folder / ".env.template").exists()
+        shutil.rmtree(deployed_folder)
 
     def test_get_existing(self):
         from core.models import CreateAgentRequest
@@ -398,6 +477,18 @@ class TestAPIRoutes:
         data = r.json()
         assert data["agent_id"] == "agent-abc123"
         assert data["agent_folder"] == "/tmp/agent-abc123"
+
+    def test_deploy_agent(self):
+        from core.models import AgentConfig
+        client, _, mgr = self._client()
+        cfg = AgentConfig(agent_id="agent-abc123", name="T", usecase_context="x", deployed=True)
+        from pathlib import Path
+        mgr.deploy.return_value = (cfg, Path("/tmp/agent-abc123"))
+        r = client.post("/api/v1/agents/agent-abc123/deploy")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["agent_id"] == "agent-abc123"
+        assert data["config"]["deployed"] is True
 
     def test_delete_404(self):
         client, _, mgr = self._client()

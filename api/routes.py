@@ -233,11 +233,43 @@ def create_app(mcp_host: MCPHost, agent_manager: AgentManager) -> FastAPI:
             raise HTTPException(404, f"Agent '{agent_id}' not found")
         return config.model_dump()
 
+    @app.post("/api/v1/agents/{agent_id}/deploy", response_model=CreateAgentResponse, tags=["agents"])
+    async def deploy_agent(agent_id: str):
+        deployed = agent_manager.deploy(agent_id)
+        if not deployed:
+            raise HTTPException(404, f"Agent '{agent_id}' not found")
+        config, folder = deployed
+        return CreateAgentResponse(
+            success=True,
+            agent_id=config.agent_id,
+            config=config,
+            agent_folder=str(folder),
+        )
+
     @app.delete("/api/v1/agents/{agent_id}", tags=["agents"])
     async def delete_agent(agent_id: str):
         if not agent_manager.delete(agent_id):
             raise HTTPException(404, f"Agent '{agent_id}' not found")
         return {"success": True, "deleted": agent_id}
+
+    @app.get("/api/v1/agents/{agent_id}/memory", tags=["agents"])
+    async def get_agent_memory(agent_id: str):
+        memory = agent_manager.memory_tree(agent_id)
+        if memory is None:
+            raise HTTPException(404, f"Agent '{agent_id}' not found")
+        return memory
+
+    @app.delete("/api/v1/agents/{agent_id}/memory", tags=["agents"])
+    async def clear_agent_memory(agent_id: str):
+        if not agent_manager.clear_agent_memory(agent_id):
+            raise HTTPException(404, f"Agent '{agent_id}' not found")
+        return {"success": True, "cleared": agent_id}
+
+    @app.delete("/api/v1/agents/{agent_id}/memory/{session_id}", tags=["agents"])
+    async def clear_agent_session_memory(agent_id: str, session_id: str):
+        if not agent_manager.clear_agent_memory(agent_id, session_id):
+            raise HTTPException(404, f"Agent '{agent_id}' not found")
+        return {"success": True, "cleared": session_id, "agent_id": agent_id}
 
     @app.get("/api/v1/agents/{agent_id}/folder", tags=["agents"])
     async def agent_folder_contents(agent_id: str):

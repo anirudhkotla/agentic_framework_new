@@ -6,7 +6,9 @@ Registry of live agent instances.
 On creation:
   1. Starts selected MCPs via MCPHost
   2. Starts MCP-type plugins via MCPHost (dynamic ServerConfig injection)
-  3. Writes fully self-contained agent folder to agents/{agent_id}/
+  3. Writes a lightweight linked agent folder to agents/{agent_id}/
+
+On deployment, the linked folder is promoted to a standalone codebase.
 """
 
 from __future__ import annotations
@@ -16,7 +18,7 @@ import logging
 import uuid
 from pathlib import Path
 
-from core.agent_folder import write_agent_folder
+from core.agent_folder import write_deployed_agent_folder, write_linked_agent_folder
 from core.executor import MistralExecutor, SessionMemory, get_executor
 from core.models import (
     AgentConfig, AgentResponse, AgentStatus,
@@ -80,12 +82,28 @@ class AgentManager:
         registry_path = Path(__file__).parent.parent / "mcp" / "registry.json"
         registry_data = json.loads(registry_path.read_text())
 
-        # Write fully self-contained agent folder
-        folder = write_agent_folder(config, registry_data)
+        # Write lightweight linked folder. The agent runs via parent routes/core
+        # until deploy() promotes it to a standalone folder.
+        folder = write_linked_agent_folder(config, registry_data)
 
         self._agents[agent_id] = config
+        self._memory.initialize_agent(agent_id, config.name)
         logger.info("Created agent: %s (%s) → %s", agent_id, request.name, folder)
         return config, folder
+
+    def deploy(self, agent_id: str) -> tuple[AgentConfig, Path] | None:
+        config = self.get(agent_id)
+        if not config:
+            return None
+
+        registry_path = Path(__file__).parent.parent / "mcp" / "registry.json"
+        registry_data = json.loads(registry_path.read_text())
+
+        deployed_config = config.model_copy(update={"deployed": True})
+        folder = write_deployed_agent_folder(deployed_config, registry_data)
+        self._agents[agent_id] = deployed_config
+        logger.info("Deployed agent: %s → %s", agent_id, folder)
+        return deployed_config, folder
 
     def get(self, agent_id: str) -> AgentConfig | None:
         return self._agents.get(agent_id)
@@ -99,6 +117,7 @@ class AgentManager:
                 "usecase": c.usecase_context[:80],
                 "mcps": c.selected_mcp_ids,
                 "plugins": c.selected_plugin_ids,
+                "deployed": c.deployed,
                 "folder": str(Path(__file__).parent.parent / "agents" / c.agent_id),
             }
             for c in self._agents.values()
@@ -106,11 +125,16 @@ class AgentManager:
 
     def delete(self, agent_id: str) -> bool:
         if agent_id in self._agents:
-            self._memory.clear(agent_id)
+            self._memory.delete(agent_id)
             del self._agents[agent_id]
             logger.info("Deleted agent: %s", agent_id)
             return True
         return False
+
+    def memory_tree(self, agent_id: str) -> dict | None:
+        if agent_id not in self._agents:
+            return None
+        return self._memory.tree(agent_id)
 
     async def run(
         self, agent_id: str, session_id: str, message: str,
@@ -141,4 +165,11 @@ class AgentManager:
             yield chunk
 
     def clear_session(self, session_id: str):
-        self._memory.clear(session_id)
+        for agent_id in self._agents:
+            self._memory.clear(agent_id, session_id)
+
+    def clear_agent_memory(self, agent_id: str, session_id: str | None = None) -> bool:
+        if agent_id not in self._agents:
+            return False
+        self._memory.clear(agent_id, session_id)
+        return True

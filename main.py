@@ -3,7 +3,7 @@ main.py — Agentic Framework entrypoint
 
 Modes:
   uv run python main.py api        → FastAPI on API_PORT
-  uv run python main.py streamlit  → Streamlit on STREAMLIT_PORT
+  uv run python main.py frontend   → Next.js UI on FRONTEND_PORT
   uv run python main.py both       → Both simultaneously
   uv run python main.py test       → pytest
 """
@@ -54,15 +54,26 @@ def build_app():
 
 
 def _check_port(port: int):
+    if _port_in_use(port):
+        logger.error(
+            "Port %s is already in use.\n"
+            "  Run: sudo lsof -ti :%s | xargs kill -9\n"
+            "  Or change API_PORT in .env",
+            port, port
+        )
+        sys.exit(1)
+
+
+def _port_in_use(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        if s.connect_ex(("localhost", port)) == 0:
-            logger.error(
-                "Port %s is already in use.\n"
-                "  Run: sudo lsof -ti :%s | xargs kill -9\n"
-                "  Or change API_PORT in .env",
-                port, port
-            )
-            sys.exit(1)
+        return s.connect_ex(("localhost", port)) == 0
+
+
+def _next_free_port(start: int) -> int:
+    port = start
+    while _port_in_use(port):
+        port += 1
+    return port
 
 
 def run_api():
@@ -76,15 +87,41 @@ def run_api():
 
 
 def run_streamlit():
-    port = os.getenv("STREAMLIT_PORT", "8502")
-    logger.info("Streamlit → http://0.0.0.0:%s", port)
-    subprocess.run(["streamlit", "run", "streamlit_app.py", "--server.port", port], check=True)
+    logger.warning("The Streamlit UI has moved to Next.js. Starting the frontend instead.")
+    run_frontend()
+
+
+def run_frontend():
+    requested_port = int(os.getenv("FRONTEND_PORT", "3000"))
+    port = _next_free_port(requested_port)
+    api_port = os.getenv("API_PORT", "8002")
+    frontend_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend")
+    env = {
+        **os.environ,
+        "NEXT_PUBLIC_API_BASE": os.getenv(
+            "NEXT_PUBLIC_API_BASE",
+            f"http://localhost:{api_port}/api/v1",
+        ),
+    }
+    if port != requested_port:
+        logger.warning(
+            "Frontend port %s is already in use. Starting on %s instead.",
+            requested_port,
+            port,
+        )
+    logger.info("Frontend → http://0.0.0.0:%s", port)
+    subprocess.run(
+        ["npm", "run", "dev", "--", "--hostname", "0.0.0.0", "--port", str(port)],
+        cwd=frontend_dir,
+        env=env,
+        check=True,
+    )
 
 
 def run_both():
     t = threading.Thread(target=run_api, daemon=True)
     t.start()
-    run_streamlit()
+    run_frontend()
 
 
 def run_tests():
@@ -93,7 +130,13 @@ def run_tests():
 
 if __name__ == "__main__":
     mode = sys.argv[1] if len(sys.argv) > 1 else "api"
-    modes = {"api": run_api, "streamlit": run_streamlit, "both": run_both, "test": run_tests}
+    modes = {
+        "api": run_api,
+        "frontend": run_frontend,
+        "streamlit": run_streamlit,
+        "both": run_both,
+        "test": run_tests,
+    }
     if mode not in modes:
         print(f"Unknown mode '{mode}'. Choose: {list(modes)}")
         sys.exit(1)

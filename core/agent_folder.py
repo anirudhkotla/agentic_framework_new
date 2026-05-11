@@ -1,21 +1,23 @@
 """
 core/agent_folder.py
 --------------------
-Writes a fully self-contained, independently runnable agent codebase
-to agents/{agent_id}/ every time an agent is created.
+Writes agent folders for two lifecycle states:
+
+1. Linked, undeployed agents created inside the parent framework. These keep
+   only their config, filtered MCP registry, and prompt snapshot on disk while
+   running through the parent routes/core/runtime.
+2. Deployed agents promoted to fully self-contained, independently runnable
+   codebases with their own env, MCP registry, prompts, core, API, and UI files.
 
 Folder structure:
     agents/{agent_id}/
-    ├── .env.template       ← only vars this agent actually needs
-    ├── requirements.txt
-    ├── README.md
-    ├── main.py             ← standalone entrypoint
-    ├── streamlit_ui.py     ← standalone Streamlit UI
     ├── agent_config.json   ← full config snapshot
-    ├── mcp/                ← copied from framework
-    ├── prompts/            ← copied from framework
-    ├── core/               ← copied from framework
-    └── api/                ← copied from framework
+    ├── README.md
+    ├── mcp/registry.json   ← filtered per-agent registry
+    └── prompts/system_prompt.md
+
+Deployed agents additionally get .env.template, requirements.txt, main.py,
+streamlit_ui.py, and copied source packages.
 """
 
 from __future__ import annotations
@@ -27,6 +29,7 @@ import textwrap
 from pathlib import Path
 
 from core.models import AgentConfig
+from prompts.system_prompt import PromptBuilder
 
 logger = logging.getLogger(__name__)
 
@@ -34,28 +37,51 @@ _FW_ROOT = Path(__file__).parent.parent
 _AGENTS_DIR = _FW_ROOT / "agents"
 
 
-# ─── Main entry point ────────────────────────────────────────────────────────
+# ─── Main entry points ───────────────────────────────────────────────────────
 
 def write_agent_folder(config: AgentConfig, registry_data: dict) -> Path:
+    """Backward-compatible standalone writer used by older callers/tests."""
+    return write_deployed_agent_folder(config, registry_data)
+
+
+def write_linked_agent_folder(config: AgentConfig, registry_data: dict) -> Path:
     folder = _AGENTS_DIR / config.agent_id
     folder.mkdir(parents=True, exist_ok=True)
 
-    _copy_source_files(folder)
-    _write_config_json(folder, config)
-    _write_filtered_registry(folder, config, registry_data)
-    _write_env_template(folder, config, registry_data)
-    _write_requirements(folder)
-    _write_readme(folder, config, registry_data)
-    _write_main_py(folder, config)
-    _write_streamlit_ui(folder, config)
+    linked_config = config.model_copy(update={"deployed": False})
+    _write_config_json(folder, linked_config)
+    _write_memory_json(folder, linked_config)
+    _write_filtered_registry(folder, linked_config, registry_data)
+    _write_prompt_snapshot(folder, linked_config, registry_data)
+    _write_linked_readme(folder, linked_config, registry_data)
 
-    logger.info("Agent folder written → %s", folder)
+    logger.info("Linked agent folder written → %s", folder)
+    return folder
+
+
+def write_deployed_agent_folder(config: AgentConfig, registry_data: dict) -> Path:
+    folder = _AGENTS_DIR / config.agent_id
+    folder.mkdir(parents=True, exist_ok=True)
+
+    deployed_config = config.model_copy(update={"deployed": True})
+    _copy_source_files(folder, deployed_config)
+    _write_config_json(folder, deployed_config)
+    _write_memory_json(folder, deployed_config)
+    _write_filtered_registry(folder, deployed_config, registry_data)
+    _write_prompt_snapshot(folder, deployed_config, registry_data)
+    _write_env_template(folder, deployed_config, registry_data)
+    _write_requirements(folder)
+    _write_deployed_readme(folder, deployed_config, registry_data)
+    _write_main_py(folder, deployed_config)
+    _write_streamlit_ui(folder, deployed_config)
+
+    logger.info("Deployed agent folder written → %s", folder)
     return folder
 
 
 # ─── Source file copier ──────────────────────────────────────────────────────
 
-def _copy_source_files(folder: Path):
+def _copy_source_files(folder: Path, config: AgentConfig):
     for d in ["mcp", "prompts", "core", "api"]:
         dest = folder / d
         dest.mkdir(exist_ok=True)
@@ -75,20 +101,109 @@ def _copy_source_files(folder: Path):
     for f in src_plugins.iterdir():
         if f.suffix == ".py":
             shutil.copy2(f, dest_plugins / f.name)
-    # Copy community plugin definitions and skills
-    src_community = src_plugins / "community"
-    dest_community = dest_plugins / "community"
-    if src_community.exists():
-        for f in src_community.iterdir():
-            if f.suffix == ".json":
-                shutil.copy2(f, dest_community / f.name)
-        src_skills = src_community / "skills"
-        if src_skills.exists():
-            dest_skills = dest_community / "skills"
-            dest_skills.mkdir(exist_ok=True)
-            for f in src_skills.iterdir():
-                if f.suffix == ".py":
-                    shutil.copy2(f, dest_skills / f.name)
+    _copy_selected_plugin_files(config, src_plugins, dest_plugins)
+
+
+def _selected_plugins(config: AgentConfig) -> list:
+    plugin_ids = getattr(config, "selected_plugin_ids", []) or []
+    if not plugin_ids:
+        return []
+    try:
+        from plugins.plugin_registry import get_plugin_registry
+        return get_plugin_registry().by_ids(plugin_ids)
+    except Exception as e:
+        logger.warning("Could not load selected plugins for agent folder: %s", e)
+        return []
+
+
+def _copy_selected_plugin_files(config: AgentConfig, src_plugins: Path, dest_plugins: Path):
+    plugins = _selected_plugins(config)
+    if not plugins:
+        return
+
+    for plugin in plugins:
+        src_dir = src_plugins / plugin.source
+        dest_dir = dest_plugins / plugin.source
+        dest_dir.mkdir(exist_ok=True)
+
+        for candidate in src_dir.glob("*.plugin.json"):
+            try:
+                if json.loads(candidate.read_text()).get("id") == plugin.id:
+                    shutil.copy2(candidate, dest_dir / candidate.name)
+                    break
+            except Exception:
+                continue
+
+        if plugin.module_path:
+            root_relative_src = src_plugins / plugin.module_path
+            source_relative_src = src_dir / plugin.module_path
+            if root_relative_src.exists():
+                module_src = root_relative_src
+                module_dest = dest_plugins / plugin.module_path
+            elif source_relative_src.exists():
+                module_src = source_relative_src
+                module_dest = dest_dir / plugin.module_path
+            else:
+                continue
+            module_dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(module_src, module_dest)
+
+
+def _selected_mcp_plugin_servers(config: AgentConfig) -> list[dict]:
+    try:
+        from plugins.plugin_schema import PluginType
+    except Exception:
+        return []
+
+    servers = []
+    for plugin in _selected_plugins(config):
+        if plugin.type == PluginType.MCP:
+            servers.append(plugin.to_server_config_dict())
+    return servers
+
+
+def _selected_plugin_tool_descriptions(config: AgentConfig) -> list[dict]:
+    try:
+        from plugins.plugin_schema import PluginType
+    except Exception:
+        return []
+
+    descriptions = []
+    for plugin in _selected_plugins(config):
+        if plugin.type == PluginType.MCP:
+            descriptions.append({
+                "lc_name": plugin.id.replace("-", "_"),
+                "category": plugin.category,
+                "description": plugin.description,
+            })
+        elif plugin.type in (PluginType.HTTP_TOOL, PluginType.PYTHON_SKILL):
+            descriptions.append(plugin.to_tool_description())
+    return descriptions
+
+
+def _selected_runtime_mcp_ids(config: AgentConfig) -> list[str]:
+    ids = list(config.selected_mcp_ids)
+    ids.extend(s["id"] for s in _selected_mcp_plugin_servers(config))
+    return list(dict.fromkeys(ids))
+
+
+def _tool_descriptions_from_registry(config: AgentConfig, registry_data: dict) -> list[dict]:
+    sel_ids = set(config.selected_mcp_ids)
+    servers = list(registry_data["layers"]["base"]["servers"])
+    servers.extend(
+        s for s in registry_data["layers"]["selectable"]["servers"]
+        if s["id"] in sel_ids
+    )
+    descriptions = [
+        {
+            "lc_name": s["id"].replace("-", "_"),
+            "category": s.get("category", "other"),
+            "description": s.get("description", s.get("name", s["id"])),
+        }
+        for s in servers
+    ]
+    descriptions.extend(_selected_plugin_tool_descriptions(config))
+    return descriptions
 
 
 # ─── agent_config.json ───────────────────────────────────────────────────────
@@ -99,14 +214,39 @@ def _write_config_json(folder: Path, config: AgentConfig):
     )
 
 
+def _write_memory_json(folder: Path, config: AgentConfig):
+    path = folder / "memory.json"
+    if path.exists():
+        return
+    path.write_text(json.dumps({
+        "agent_id": config.agent_id,
+        "agent_name": config.name,
+        "schema_version": 1,
+        "updated_at": None,
+        "sessions": {},
+    }, indent=2))
+
+
+def _write_prompt_snapshot(folder: Path, config: AgentConfig, registry_data: dict):
+    prompt_dir = folder / "prompts"
+    prompt_dir.mkdir(exist_ok=True)
+    prompt = PromptBuilder().build(
+        tool_descriptions=_tool_descriptions_from_registry(config, registry_data),
+        usecase_context=config.usecase_context,
+    )
+    (prompt_dir / "system_prompt.md").write_text(prompt)
+
+
 # ─── Filtered registry ───────────────────────────────────────────────────────
 
 def _write_filtered_registry(folder: Path, config: AgentConfig, registry_data: dict):
+    (folder / "mcp").mkdir(exist_ok=True)
     sel_ids = set(config.selected_mcp_ids)
     filtered_selectable = [
         s for s in registry_data["layers"]["selectable"]["servers"]
         if s["id"] in sel_ids
     ]
+    filtered_selectable.extend(_selected_mcp_plugin_servers(config))
     filtered = {
         "version": registry_data.get("version", "1.0.0"),
         "description": f"Registry for agent: {config.name} ({config.agent_id})",
@@ -125,7 +265,9 @@ def _write_filtered_registry(folder: Path, config: AgentConfig, registry_data: d
 # ─── .env.template ───────────────────────────────────────────────────────────
 
 def _write_env_template(folder: Path, config: AgentConfig, registry_data: dict):
-    sel_map = {s["id"]: s for s in registry_data["layers"]["selectable"]["servers"]}
+    selectable = list(registry_data["layers"]["selectable"]["servers"])
+    selectable.extend(_selected_mcp_plugin_servers(config))
+    sel_map = {s["id"]: s for s in selectable}
 
     lines = [
         "# ================================================================",
@@ -161,7 +303,7 @@ def _write_env_template(folder: Path, config: AgentConfig, registry_data: dict):
     ]
 
     added_cats: set[str] = set()
-    for sid in config.selected_mcp_ids:
+    for sid in _selected_runtime_mcp_ids(config):
         srv = sel_map.get(sid)
         if not srv or not srv.get("required_env"):
             continue
@@ -173,6 +315,23 @@ def _write_env_template(folder: Path, config: AgentConfig, registry_data: dict):
         for var in srv["required_env"]:
             lines.append(f"{var}=")
         lines.append("")
+
+    plugin_envs: list[tuple[str, list[str]]] = []
+    for plugin in _selected_plugins(config):
+        env_names = list(plugin.required_env or [])
+        if plugin.auth_env:
+            env_names.append(plugin.auth_env)
+        deduped = list(dict.fromkeys(env_names))
+        if deduped:
+            plugin_envs.append((plugin.name, deduped))
+
+    if plugin_envs:
+        lines.append("# ── Selected plugins ─────────────────────────────────────────")
+        for plugin_name, env_names in plugin_envs:
+            lines.append(f"# {plugin_name}")
+            for var in env_names:
+                lines.append(f"{var}=")
+            lines.append("")
 
     (folder / ".env.template").write_text("\n".join(lines) + "\n")
 
@@ -196,7 +355,41 @@ def _write_requirements(folder: Path):
 
 # ─── README.md ───────────────────────────────────────────────────────────────
 
-def _write_readme(folder: Path, config: AgentConfig, registry_data: dict):
+def _write_linked_readme(folder: Path, config: AgentConfig, registry_data: dict):
+    sel_map = {s["id"]: s["name"] for s in registry_data["layers"]["selectable"]["servers"]}
+    base_names = [s["name"] for s in registry_data["layers"]["base"]["servers"]]
+    selected_names = [sel_map[sid] for sid in config.selected_mcp_ids if sid in sel_map]
+
+    (folder / "README.md").write_text(textwrap.dedent(f"""\
+        # {config.name}
+
+        > Agent ID: `{config.agent_id}` | Model: `{config.model_name}` | State: linked
+
+        ## What this agent does
+        {config.usecase_context}
+
+        ## Runtime
+        This agent is not deployed yet. It runs through the parent framework routes,
+        core executor, parent environment, and parent MCP host.
+
+        ## Files in this folder
+        - `agent_config.json`: per-agent config snapshot
+        - `mcp/registry.json`: filtered MCP registry for this agent
+        - `prompts/system_prompt.md`: rendered prompt snapshot for review
+
+        ## Tools loaded by parent runtime
+        **Base layer (always active)**
+        {chr(10).join(f"- {n}" for n in base_names)}
+
+        **Selected for this agent**
+        {chr(10).join(f"- {n}" for n in selected_names) if selected_names else "- None"}
+
+        Deploy this agent when you want an independent folder with its own env,
+        copied runtime files, standalone API, and Streamlit UI.
+    """))
+
+
+def _write_deployed_readme(folder: Path, config: AgentConfig, registry_data: dict):
     sel_map = {s["id"]: s["name"] for s in registry_data["layers"]["selectable"]["servers"]}
     base_names = [s["name"] for s in registry_data["layers"]["base"]["servers"]]
     selected_names = [sel_map[sid] for sid in config.selected_mcp_ids if sid in sel_map]
@@ -263,7 +456,7 @@ def _write_main_py(folder: Path, config: AgentConfig):
     """
     agent_id = config.agent_id
     agent_name = config.name
-    selected_ids_repr = repr(config.selected_mcp_ids)
+    selected_ids_repr = repr(_selected_runtime_mcp_ids(config))
 
     content = textwrap.dedent(f'''\
         """
@@ -322,7 +515,8 @@ def _write_main_py(folder: Path, config: AgentConfig):
             results = host.start(selected_ids=SELECTED_IDS)
             for sid, ok in results.items():
                 logger.info("MCP [%s]: %s", sid, "OK" if ok else "FAILED")
-            memory = SessionMemory()
+            memory = SessionMemory(agents_dir=Path(__file__).parent.parent)
+            memory.initialize_agent(_CONFIG.agent_id, _CONFIG.name)
             executor = MistralExecutor(host, memory)
             return host, executor, memory
 
@@ -351,7 +545,7 @@ def _write_main_py(folder: Path, config: AgentConfig):
                         print("Goodbye!")
                         break
                     if msg.lower() == "clear":
-                        memory.clear(session_id)
+                        memory.clear(_CONFIG.agent_id, session_id)
                         print("[Memory cleared]\\n")
                         continue
                     user_input = UserInput(
@@ -443,7 +637,20 @@ def _write_main_py(folder: Path, config: AgentConfig):
 
             @app.delete("/api/v1/agent/session/{{session_id}}")
             async def clear_session(session_id: str):
-                memory.clear(session_id)
+                memory.clear(_CONFIG.agent_id, session_id)
+                return {{"success": True}}
+
+            @app.get("/api/v1/agents/{{agent_id}}/memory")
+            async def get_agent_memory(agent_id: str):
+                if agent_id != _CONFIG.agent_id:
+                    return {{"error": "Agent not found"}}
+                return memory.tree(_CONFIG.agent_id)
+
+            @app.delete("/api/v1/agents/{{agent_id}}/memory/{{session_id}}")
+            async def clear_agent_session_memory(agent_id: str, session_id: str):
+                if agent_id != _CONFIG.agent_id:
+                    return {{"success": False, "error": "Agent not found"}}
+                memory.clear(_CONFIG.agent_id, session_id)
                 return {{"success": True}}
 
             logger.info("API  → http://%s:%s", api_host, api_port)
@@ -522,7 +729,7 @@ def _write_streamlit_ui(folder: Path, config: AgentConfig):
             if st.button("Clear memory"):
                 sid = st.session_state.get("session_id", "")
                 if sid:
-                    requests.delete(f"{{API}}/agent/session/{{sid}}", timeout=5)
+                    requests.delete(f"{{API}}/agents/{{AGENT_ID}}/memory/{{sid}}", timeout=5)
                 st.session_state["messages"] = []
                 st.rerun()
 

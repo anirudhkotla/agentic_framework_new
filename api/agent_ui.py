@@ -310,7 +310,7 @@ async function sendMessage() {{
 // ── Clear session ─────────────────────────────────────────────────────────────
 async function clearSession() {{
   try {{
-    await fetch(`${{API_BASE}}/api/v1/agent/session/${{sessionId}}`, {{method:"DELETE"}});
+    await fetch(`${{API_BASE}}/api/v1/agents/${{AGENT_ID}}/memory/${{sessionId}}`, {{method:"DELETE"}});
   }} catch(e) {{}}
   sessionId = crypto.randomUUID();
   const msgs = document.getElementById("messages");

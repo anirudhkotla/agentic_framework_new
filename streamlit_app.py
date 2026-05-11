@@ -532,7 +532,7 @@ elif st.session_state.page == "chat":
         ca, cb = st.columns(2)
         with ca:
             if st.button("🗑️ Clear memory", use_container_width=True):
-                api_delete(f"/agent/session/{st.session_state.session_id}")
+                api_delete(f"/agents/{selected_agent_id}/memory/{st.session_state.session_id}")
                 st.session_state.messages   = []
                 st.session_state.session_id = str(uuid.uuid4())
                 st.rerun()
@@ -547,6 +547,15 @@ elif st.session_state.page == "chat":
                     st.caption(f"Plugins: {', '.join(plugins)}")
                 ui_url = f"http://localhost:{API_PORT}/agents/{selected_agent_id}/ui"
                 st.markdown(f"[🌐 Open direct URL]({ui_url})")
+                if detail.get("deployed"):
+                    st.caption("Deployed as standalone folder")
+                elif st.button("Deploy standalone", use_container_width=True):
+                    deployed = api_post(f"/agents/{selected_agent_id}/deploy", {})
+                    if deployed and deployed.get("success"):
+                        st.success(f"Deployed to `{deployed.get('agent_folder')}`")
+                        st.rerun()
+                    else:
+                        st.error(deployed.get("error") if deployed else "Deploy failed")
 
     st.divider()
 

@@ -19,6 +19,7 @@ import os
 import random
 import time
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import Any, AsyncIterator
 
 from dotenv import load_dotenv
@@ -44,29 +45,108 @@ _RATE_LIMIT_BASE_DELAY  = 2.0
 _LLM_TIMEOUT_SECONDS    = 120.0
 
 
-# ─── Session memory ───────────────────────────────────────────────────────────
+# ─── Agent memory ─────────────────────────────────────────────────────────────
 
 class SessionMemory:
-    def __init__(self):
-        self._store: dict[str, list[ChatMessage]] = {}
+    def __init__(self, agents_dir: Path | None = None):
+        self._agents_dir = agents_dir or Path(__file__).parent.parent / "agents"
+        self._store: dict[str, dict[str, Any]] = {}
 
-    def append(self, session_id: str, message: ChatMessage):
-        self._store.setdefault(session_id, []).append(message)
+    def initialize_agent(self, agent_id: str, agent_name: str | None = None):
+        data = self._load(agent_id)
+        if agent_name and data.get("agent_name") != agent_name:
+            data["agent_name"] = agent_name
+            self._save(agent_id)
+        else:
+            self._ensure_file(agent_id)
 
-    def get(self, session_id: str) -> list[ChatMessage]:
-        return self._store.get(session_id, [])
+    def append(self, agent_id: str, session_id: str, message: ChatMessage):
+        data = self._load(agent_id)
+        sessions = data.setdefault("sessions", {})
+        session = sessions.setdefault(session_id, {"session_id": session_id, "messages": []})
+        session["messages"].append(message.model_dump(mode="json"))
+        data["updated_at"] = message.timestamp.isoformat()
+        self._save(agent_id)
 
-    def clear(self, session_id: str):
-        self._store.pop(session_id, None)
+    def get(self, agent_id: str, session_id: str | None = None) -> list[ChatMessage]:
+        data = self._load(agent_id)
+        sessions = data.get("sessions", {})
+        raw_messages: list[dict[str, Any]] = []
 
-    def to_lc_messages(self, session_id: str) -> list:
+        if session_id is not None:
+            raw_messages = sessions.get(session_id, {}).get("messages", [])
+        else:
+            for session in sessions.values():
+                raw_messages.extend(session.get("messages", []))
+            raw_messages.sort(key=lambda msg: msg.get("timestamp", ""))
+
+        return [ChatMessage(**msg) for msg in raw_messages]
+
+    def tree(self, agent_id: str) -> dict[str, Any]:
+        return self._load(agent_id)
+
+    def clear(self, agent_id: str, session_id: str | None = None):
+        data = self._load(agent_id)
+        if session_id is None:
+            data["sessions"] = {}
+        else:
+            data.setdefault("sessions", {}).pop(session_id, None)
+        data["updated_at"] = None
+        self._save(agent_id)
+
+    def delete(self, agent_id: str):
+        self._store.pop(agent_id, None)
+        path = self._path(agent_id)
+        if path.exists():
+            path.unlink()
+
+    def to_lc_messages(self, agent_id: str) -> list:
         out = []
-        for msg in self.get(session_id):
+        for msg in self.get(agent_id):
             if msg.role == MessageRole.USER:
                 out.append(HumanMessage(content=msg.content))
             elif msg.role == MessageRole.ASSISTANT:
                 out.append(AIMessage(content=msg.content))
         return out
+
+    def _path(self, agent_id: str) -> Path:
+        return self._agents_dir / agent_id / "memory.json"
+
+    def _default_tree(self, agent_id: str) -> dict[str, Any]:
+        return {
+            "agent_id": agent_id,
+            "agent_name": None,
+            "schema_version": 1,
+            "updated_at": None,
+            "sessions": {},
+        }
+
+    def _load(self, agent_id: str) -> dict[str, Any]:
+        if agent_id in self._store:
+            return self._store[agent_id]
+
+        path = self._path(agent_id)
+        if path.exists():
+            try:
+                self._store[agent_id] = json.loads(path.read_text())
+                return self._store[agent_id]
+            except Exception:
+                logger.warning("Could not read memory file for %s; starting fresh", agent_id)
+
+        self._store[agent_id] = self._default_tree(agent_id)
+        self._save(agent_id)
+        return self._store[agent_id]
+
+    def _ensure_file(self, agent_id: str):
+        path = self._path(agent_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists():
+            path.write_text(json.dumps(self._store[agent_id], indent=2))
+
+    def _save(self, agent_id: str):
+        path = self._path(agent_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(self._store[agent_id], indent=2, default=str))
 
 
 # ─── Abstract base ────────────────────────────────────────────────────────────
@@ -294,16 +374,18 @@ class MistralExecutor(BaseExecutor):
             system = self._build_system_prompt(config)
             llm_with_tools = llm.bind_tools(tools) if tools else llm
 
-            history  = self._memory.to_lc_messages(user_input.session_id)
+            history  = self._memory.to_lc_messages(config.agent_id) if config.memory_enabled else []
             messages = [
                 SystemMessage(content=system),
                 *history,
                 HumanMessage(content=user_input.content),
             ]
-            self._memory.append(
-                user_input.session_id,
-                ChatMessage(role=MessageRole.USER, content=user_input.content),
-            )
+            if config.memory_enabled:
+                self._memory.append(
+                    config.agent_id,
+                    user_input.session_id,
+                    ChatMessage(role=MessageRole.USER, content=user_input.content),
+                )
 
             iterations    = 0
             final_content = ""
@@ -338,10 +420,23 @@ class MistralExecutor(BaseExecutor):
                 )
                 logger.warning("Agent %s hit max_iterations", config.agent_id)
 
-            self._memory.append(
-                user_input.session_id,
-                ChatMessage(role=MessageRole.ASSISTANT, content=final_content),
-            )
+            if config.memory_enabled:
+                self._memory.append(
+                    config.agent_id,
+                    user_input.session_id,
+                    ChatMessage(
+                        role=MessageRole.ASSISTANT,
+                        content=final_content,
+                        metadata={
+                            "tool_calls": [
+                                call.model_dump(mode="json") for call in tool_calls_log
+                            ],
+                            "iterations_used": iterations,
+                            "duration_ms": round(time.time() * 1000 - start, 2),
+                            "status": AgentStatus.COMPLETE.value,
+                        },
+                    ),
+                )
             return AgentResponse(
                 session_id=user_input.session_id,
                 agent_id=config.agent_id,
@@ -372,12 +467,30 @@ class MistralExecutor(BaseExecutor):
         llm = self._build_llm(config)
         messages = [
             SystemMessage(content=self._build_system_prompt(config)),
-            *self._memory.to_lc_messages(user_input.session_id),
+            *(self._memory.to_lc_messages(config.agent_id) if config.memory_enabled else []),
             HumanMessage(content=user_input.content),
         ]
+        if config.memory_enabled:
+            self._memory.append(
+                config.agent_id,
+                user_input.session_id,
+                ChatMessage(role=MessageRole.USER, content=user_input.content),
+            )
+        final_content = ""
         async for chunk in llm.astream(messages):
             if chunk.content:
+                final_content += chunk.content
                 yield chunk.content
+        if config.memory_enabled and final_content:
+            self._memory.append(
+                config.agent_id,
+                user_input.session_id,
+                ChatMessage(
+                    role=MessageRole.ASSISTANT,
+                    content=final_content,
+                    metadata={"status": AgentStatus.COMPLETE.value},
+                ),
+            )
 
     async def _execute_tool(self, tc: dict) -> tuple[Any, ToolCall]:
         """

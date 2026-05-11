@@ -69,6 +69,7 @@ class AgentConfig(BaseModel):
     temperature: float = Field(default=0.3, ge=0.0, le=1.0)
     stream: bool = False
     memory_enabled: bool = True
+    deployed: bool = False
 
     @field_validator("agent_id")
     @classmethod
