@@ -3,11 +3,11 @@ core/executor.py
 ----------------
 Agent Executor using Mistral via langchain-mistralai.
 
-- Full agentic tool-call loop (LLM → tools → LLM)
-- Tool registry: lc_name → (server_id, real_tool_name)
-- 429 rate limit exponential backoff with jitter
-- Session memory injected per turn
-- Abstract BaseExecutor — swap LLMs by subclassing
+KEY FIX: Tool args are passed directly from tc["args"] in _execute_tool,
+not through the StructuredTool function signature. The StructuredTool
+functions exist only to give LangChain schema information — actual
+execution goes straight to MCPHost.call_tool() or plugin_executor.
+This avoids the kwargs-wrapping bug entirely.
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, Tool
 from langchain_core.tools import StructuredTool
 from langchain_core.runnables import RunnableConfig
 from langchain_mistralai import ChatMistralAI
+from pydantic import create_model
 
 from core.models import (
     AgentConfig, AgentResponse, AgentStatus,
@@ -39,8 +40,8 @@ load_dotenv(override=False)
 logger = logging.getLogger(__name__)
 
 _RATE_LIMIT_MAX_RETRIES = 4
-_RATE_LIMIT_BASE_DELAY = 2.0
-_LLM_TIMEOUT_SECONDS = 120.0
+_RATE_LIMIT_BASE_DELAY  = 2.0
+_LLM_TIMEOUT_SECONDS    = 120.0
 
 
 # ─── Session memory ───────────────────────────────────────────────────────────
@@ -90,14 +91,111 @@ async def _with_backoff(coro_fn, max_retries: int = _RATE_LIMIT_MAX_RETRIES):
                 "Mistral API may be overloaded — try again shortly."
             )
         except Exception as e:
-            is_rate = "429" in str(e) or "rate_limit" in str(e).lower() or "rate limit" in str(e).lower()
+            is_rate = "429" in str(e) or "rate_limit" in str(e).lower()
             if is_rate and attempt < max_retries:
                 wait = delay + random.uniform(0, delay * 0.3)
-                logger.warning("Rate limit (attempt %d/%d). Waiting %.1fs", attempt + 1, max_retries, wait)
+                logger.warning(
+                    "Rate limit (attempt %d/%d). Waiting %.1fs",
+                    attempt + 1, max_retries, wait,
+                )
                 await asyncio.sleep(wait)
                 delay *= 2
             else:
                 raise
+
+
+# ─── Tool builder helpers ─────────────────────────────────────────────────────
+
+def _schema_to_pydantic(name: str, schema: dict):
+    """
+    Convert a JSON Schema dict into a Pydantic model for StructuredTool.
+    This gives LangChain the correct field names so the LLM sends
+    the right argument names (e.g. 'url' not 'query').
+    """
+    from typing import Optional
+    props = schema.get("properties", {})
+    required = set(schema.get("required", []))
+    fields = {}
+    for field_name, field_schema in props.items():
+        python_type = _json_type_to_python(field_schema.get("type", "string"))
+        if field_name in required:
+            fields[field_name] = (python_type, ...)
+        else:
+            default = field_schema.get("default", None)
+            fields[field_name] = (Optional[python_type], default)
+
+    if not fields:
+        # Fallback: single 'query' string field
+        fields = {"query": (str, ...)}
+
+    return create_model(f"{name}_args", **fields)
+
+
+def _json_type_to_python(json_type: str):
+    return {
+        "string":  str,
+        "integer": int,
+        "number":  float,
+        "boolean": bool,
+        "array":   list,
+        "object":  dict,
+    }.get(json_type, str)
+
+
+def _make_mcp_tool(
+    lc_name: str,
+    description: str,
+    input_schema: dict,
+    server_id: str,
+    real_name: str,
+    mcp_host: MCPHost,
+) -> StructuredTool:
+    """
+    Build a StructuredTool for an MCP tool.
+
+    The function body is a NO-OP placeholder — actual execution happens
+    in _execute_tool() which calls mcp_host.call_tool() directly with
+    tc["args"] from the LLM response.
+
+    The Pydantic args model is what matters: it tells LangChain what
+    field names to use, so the LLM sends {"url": "..."} not {"query": "..."}.
+    """
+    args_model = _schema_to_pydantic(lc_name, input_schema)
+
+    async def _placeholder(**kwargs) -> str:
+        # Called by LangChain test/validation only.
+        # Real execution goes through _execute_tool → mcp_host.call_tool
+        return f"[{lc_name} placeholder]"
+
+    return StructuredTool(
+        name=lc_name,
+        description=description,
+        args_schema=args_model,
+        coroutine=_placeholder,
+    )
+
+
+def _make_plugin_tool(
+    lc_name: str,
+    description: str,
+    input_schema: dict,
+    plugin_obj: Any,
+) -> StructuredTool:
+    """
+    Build a StructuredTool for a plugin (http_tool or python_skill).
+    Same pattern: args_schema drives what the LLM sends, execution is in _execute_tool.
+    """
+    args_model = _schema_to_pydantic(lc_name, input_schema)
+
+    async def _placeholder(**kwargs) -> str:
+        return f"[{lc_name} plugin placeholder]"
+
+    return StructuredTool(
+        name=lc_name,
+        description=description,
+        args_schema=args_model,
+        coroutine=_placeholder,
+    )
 
 
 # ─── Mistral executor ─────────────────────────────────────────────────────────
@@ -107,8 +205,8 @@ class MistralExecutor(BaseExecutor):
         self._mcp = mcp_host
         self._memory = memory or SessionMemory()
         self._prompt_builder = PromptBuilder()
-        # Maps lc_name → (server_id, real_tool_name)
-        self._tool_registry: dict[str, tuple[str, str]] = {}
+        # Maps lc_name → (source, server_id, real_name, plugin_obj|None)
+        self._tool_registry: dict[str, tuple[str, str, str, Any]] = {}
 
     def _build_llm(self, config: AgentConfig) -> ChatMistralAI:
         return ChatMistralAI(
@@ -119,48 +217,70 @@ class MistralExecutor(BaseExecutor):
 
     def _build_tools(self, config: AgentConfig) -> list[StructuredTool]:
         """
-        Build LangChain tools from real MCP tool schemas.
-        Registry maps lc_name → (server_id, real_tool_name) for exact resolution.
+        Build StructuredTools for all active MCP tools and plugin tools.
+
+        Each tool's args_schema is built from the real MCP input schema
+        so the LLM sends correctly named arguments. The function body
+        is a placeholder — execution goes through _execute_tool directly.
         """
         tools = []
         self._tool_registry.clear()
 
+        # ── 1. MCP tools ──────────────────────────────────────────────────────
         for td in self._mcp.get_tool_descriptions():
             if td["server_id"] == "builtin":
                 continue
 
             lc_name = td["lc_name"].replace("-", "_")
             server_id = td["server_id"]
-            real_tool_name = td["tool_name"]
-            self._tool_registry[lc_name] = (server_id, real_tool_name)
+            real_name = td["tool_name"]
+            input_schema = td.get("input_schema") or {}
+            self._tool_registry[lc_name] = ("mcp", server_id, real_name, None)
 
-            schema = td.get("input_schema") or {}
-            description = td["description"]
-
-            async def _fn(
-                query: str = "",
-                _sid: str = server_id,
-                _tool: str = real_tool_name,
-                _schema: dict = schema,
-                **kwargs,
-            ) -> str:
-                args = kwargs if kwargs else ({"query": query} if query else {})
-                try:
-                    result = await self._mcp.call_tool(_sid, _tool, args)
-                    return _to_str(result)
-                except Exception as e:
-                    return f"Tool error ({_sid}/{_tool}): {e}"
-
-            tools.append(StructuredTool.from_function(
-                coroutine=_fn,
-                name=lc_name,
-                description=description,
+            tools.append(_make_mcp_tool(
+                lc_name=lc_name,
+                description=td["description"],
+                input_schema=input_schema,
+                server_id=server_id,
+                real_name=real_name,
+                mcp_host=self._mcp,
             ))
+
+        # ── 2. Plugin tools (http_tool + python_skill) ────────────────────────
+        plugin_ids = getattr(config, "selected_plugin_ids", []) or []
+        if plugin_ids:
+            try:
+                from plugins.plugin_registry import get_plugin_registry
+                reg = get_plugin_registry()
+                for td in reg.get_tool_descriptions(plugin_ids):
+                    lc_name = td["lc_name"].replace("-", "_")
+                    plugin_obj = reg.get(td["tool_name"])
+                    input_schema = td.get("input_schema") or {}
+                    self._tool_registry[lc_name] = (
+                        "plugin", td["server_id"], td["tool_name"], plugin_obj
+                    )
+                    tools.append(_make_plugin_tool(
+                        lc_name=lc_name,
+                        description=td["description"],
+                        input_schema=input_schema,
+                        plugin_obj=plugin_obj,
+                    ))
+            except Exception as e:
+                logger.error("Failed to load plugin tools: %s", e)
+
         return tools
 
     def _build_system_prompt(self, config: AgentConfig) -> str:
+        tool_descs = list(self._mcp.get_tool_descriptions())
+        plugin_ids = getattr(config, "selected_plugin_ids", []) or []
+        if plugin_ids:
+            try:
+                from plugins.plugin_registry import get_plugin_registry
+                tool_descs += get_plugin_registry().get_tool_descriptions(plugin_ids)
+            except Exception:
+                pass
         return self._prompt_builder.build(
-            tool_descriptions=self._mcp.get_tool_descriptions(),
+            tool_descriptions=tool_descs,
             usecase_context=config.usecase_context,
         )
 
@@ -169,14 +289,14 @@ class MistralExecutor(BaseExecutor):
         tool_calls_log: list[ToolCall] = []
 
         try:
-            llm = self._build_llm(config)
-            tools = self._build_tools(config)
-            system_prompt = self._build_system_prompt(config)
+            llm    = self._build_llm(config)
+            tools  = self._build_tools(config)
+            system = self._build_system_prompt(config)
             llm_with_tools = llm.bind_tools(tools) if tools else llm
 
-            history = self._memory.to_lc_messages(user_input.session_id)
+            history  = self._memory.to_lc_messages(user_input.session_id)
             messages = [
-                SystemMessage(content=system_prompt),
+                SystemMessage(content=system),
                 *history,
                 HumanMessage(content=user_input.content),
             ]
@@ -185,17 +305,18 @@ class MistralExecutor(BaseExecutor):
                 ChatMessage(role=MessageRole.USER, content=user_input.content),
             )
 
-            iterations = 0
+            iterations    = 0
             final_content = ""
 
             while iterations < config.max_iterations:
                 iterations += 1
-
                 _msgs = messages[:]
-                _llm = llm_with_tools
+                _llm  = llm_with_tools
 
                 async def _call(_m=_msgs, _l=_llm):
-                    return await _l.ainvoke(_m, config=RunnableConfig(tags=[config.agent_id]))
+                    return await _l.ainvoke(
+                        _m, config=RunnableConfig(tags=[config.agent_id])
+                    )
 
                 response = await _with_backoff(_call)
 
@@ -207,9 +328,14 @@ class MistralExecutor(BaseExecutor):
                 for tc in response.tool_calls:
                     result, log = await self._execute_tool(tc)
                     tool_calls_log.append(log)
-                    messages.append(ToolMessage(content=_to_str(result), tool_call_id=tc["id"]))
+                    messages.append(
+                        ToolMessage(content=_to_str(result), tool_call_id=tc["id"])
+                    )
             else:
-                final_content = f"Reached max iterations ({config.max_iterations}). Partial result returned."
+                final_content = (
+                    f"Reached max iterations ({config.max_iterations}). "
+                    "Partial result returned."
+                )
                 logger.warning("Agent %s hit max_iterations", config.agent_id)
 
             self._memory.append(
@@ -217,9 +343,12 @@ class MistralExecutor(BaseExecutor):
                 ChatMessage(role=MessageRole.ASSISTANT, content=final_content),
             )
             return AgentResponse(
-                session_id=user_input.session_id, agent_id=config.agent_id,
-                status=AgentStatus.COMPLETE, message=final_content,
-                tool_calls=tool_calls_log, iterations_used=iterations,
+                session_id=user_input.session_id,
+                agent_id=config.agent_id,
+                status=AgentStatus.COMPLETE,
+                message=final_content,
+                tool_calls=tool_calls_log,
+                iterations_used=iterations,
                 duration_ms=round(time.time() * 1000 - start, 2),
             )
 
@@ -251,20 +380,39 @@ class MistralExecutor(BaseExecutor):
                 yield chunk.content
 
     async def _execute_tool(self, tc: dict) -> tuple[Any, ToolCall]:
-        t0 = time.time() * 1000
+        """
+        Execute a tool call from the LLM.
+
+        tc["args"] contains the arguments exactly as the LLM sent them
+        (correct field names, correct types) because args_schema told it
+        what fields to use. We pass them directly to MCPHost or plugin_executor
+        — no wrapping, no transformation.
+        """
+        t0      = time.time() * 1000
         lc_name = tc.get("name", "")
-        args = tc.get("args", {})
+        args    = tc.get("args", {})   # ← direct from LLM, field names match MCP schema
 
         resolved = self._tool_registry.get(lc_name)
         if resolved:
-            server_id, real_name = resolved
+            source, server_id, real_name, plugin_obj = resolved
         else:
-            server_id = lc_name.split("__")[0].replace("_", "-")
-            real_name = lc_name
-            logger.warning("Tool '%s' not in registry, fallback server='%s'", lc_name, server_id)
+            source     = "mcp"
+            server_id  = lc_name.split("__")[0].replace("_", "-")
+            real_name  = lc_name
+            plugin_obj = None
+            logger.warning(
+                "Tool '%s' not in registry, fallback server='%s'",
+                lc_name, server_id,
+            )
 
         try:
-            result = await self._mcp.call_tool(server_id, real_name, args)
+            if source == "plugin" and plugin_obj is not None:
+                from plugins.plugin_executor import execute_plugin_tool
+                result = await execute_plugin_tool(plugin_obj, args)
+            else:
+                # Pass args directly — field names match the MCP tool schema
+                result = await self._mcp.call_tool(server_id, real_name, args)
+
             return result, ToolCall(
                 server_id=server_id, tool_name=real_name, arguments=args,
                 result=result, duration_ms=round(time.time() * 1000 - t0, 2),
@@ -293,7 +441,11 @@ _EXECUTORS: dict[str, type[BaseExecutor]] = {
 }
 
 
-def get_executor(name: str, mcp_host: MCPHost, memory: SessionMemory | None = None) -> BaseExecutor:
+def get_executor(
+    name: str,
+    mcp_host: MCPHost,
+    memory: SessionMemory | None = None,
+) -> BaseExecutor:
     cls = _EXECUTORS.get(name)
     if not cls:
         raise ValueError(f"Unknown executor '{name}'. Available: {list(_EXECUTORS)}")

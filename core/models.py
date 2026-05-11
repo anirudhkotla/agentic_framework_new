@@ -63,6 +63,7 @@ class AgentConfig(BaseModel):
     name: str
     usecase_context: str
     selected_mcp_ids: list[str] = Field(default_factory=list)
+    selected_plugin_ids: list[str] = Field(default_factory=list)
     model_name: str = Field(default_factory=_default_model)
     max_iterations: int = Field(default=10, ge=1, le=50)
     temperature: float = Field(default=0.3, ge=0.0, le=1.0)
@@ -108,6 +109,7 @@ class CreateAgentRequest(BaseModel):
     name: str
     usecase_context: str
     selected_mcp_ids: list[str] = Field(default_factory=list)
+    selected_plugin_ids: list[str] = Field(default_factory=list)
     model_name: str = Field(default_factory=_default_model)
     max_iterations: int = 10
     temperature: float = 0.3

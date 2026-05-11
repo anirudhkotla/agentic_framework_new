@@ -2,12 +2,16 @@
 core/agent_manager.py
 ---------------------
 Registry of live agent instances.
-On creation, calls agent_folder.write_agent_folder() to write
-a fully self-contained folder to agents/{agent_id}/.
+
+On creation:
+  1. Starts selected MCPs via MCPHost
+  2. Starts MCP-type plugins via MCPHost (dynamic ServerConfig injection)
+  3. Writes fully self-contained agent folder to agents/{agent_id}/
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from pathlib import Path
@@ -37,23 +41,46 @@ class AgentManager:
             name=request.name,
             usecase_context=request.usecase_context,
             selected_mcp_ids=request.selected_mcp_ids,
+            selected_plugin_ids=request.selected_plugin_ids,
             model_name=request.model_name,
             max_iterations=request.max_iterations,
             temperature=request.temperature,
         )
-        # Start selected MCPs in the framework host
+
+        # Start selected registry MCPs
         if request.selected_mcp_ids:
             results = self._mcp.start(request.selected_mcp_ids)
             failed = [sid for sid, ok in results.items() if not ok]
             if failed:
                 logger.warning("Some MCPs failed to start: %s", failed)
 
-        # Write fully self-contained agent folder
-        registry = load_registry()
-        import json
-        from pathlib import Path as P
-        registry_path = P(__file__).parent.parent / "mcp" / "registry.json"
+        # Start MCP-type plugins by injecting them into the host
+        if request.selected_plugin_ids:
+            try:
+                from plugins.plugin_registry import get_plugin_registry
+                from plugins.plugin_schema import PluginType
+                from mcp.host import ServerConfig
+                reg = get_plugin_registry()
+                mcp_plugins = [
+                    p for p in reg.by_ids(request.selected_plugin_ids)
+                    if p.type == PluginType.MCP
+                ]
+                for plugin in mcp_plugins:
+                    cfg_dict = plugin.to_server_config_dict()
+                    srv_cfg = ServerConfig(**cfg_dict)
+                    # Inject into host registry and start
+                    self._mcp.registry.selectable_servers.append(srv_cfg)
+                    results = self._mcp.start([srv_cfg.id])
+                    if not results.get(srv_cfg.id):
+                        logger.warning("Plugin MCP '%s' failed to start", srv_cfg.id)
+            except Exception as e:
+                logger.error("Failed to start plugin MCPs: %s", e)
+
+        # Load registry data for folder writer
+        registry_path = Path(__file__).parent.parent / "mcp" / "registry.json"
         registry_data = json.loads(registry_path.read_text())
+
+        # Write fully self-contained agent folder
         folder = write_agent_folder(config, registry_data)
 
         self._agents[agent_id] = config
@@ -71,9 +98,8 @@ class AgentManager:
                 "model": c.model_name,
                 "usecase": c.usecase_context[:80],
                 "mcps": c.selected_mcp_ids,
-                "folder": str(
-                    Path(__file__).parent.parent / "agents" / c.agent_id
-                ),
+                "plugins": c.selected_plugin_ids,
+                "folder": str(Path(__file__).parent.parent / "agents" / c.agent_id),
             }
             for c in self._agents.values()
         ]
@@ -95,8 +121,7 @@ class AgentManager:
         if not config:
             return AgentResponse(
                 session_id=session_id, agent_id=agent_id,
-                status=AgentStatus.ERROR,
-                message="Agent not found.",
+                status=AgentStatus.ERROR, message="Agent not found.",
                 error=f"No agent with id '{agent_id}'",
             )
         user_input = UserInput(
